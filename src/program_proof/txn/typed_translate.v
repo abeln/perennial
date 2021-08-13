@@ -38,13 +38,15 @@ Section translate.
     | _ => False
     end.
 
-  Fixpoint atomic_deconvertible (s: sty) : Prop :=
+  Fixpoint atomic_deconvertible (s: sty) {struct s} : Prop :=
     match s with
     | baseT _ => True
     | prodT t1 t2 => atomic_deconvertible t1 ∧ atomic_deconvertible t2
     | sumT t1 t2 => atomic_deconvertible t1 ∧ atomic_deconvertible t2
     | listT t => atomic_deconvertible t
     | extT AllocT => True
+    | arrayT t => atomic_deconvertible t
+    | structRefT ts => fold_left (∧) (map atomic_deconvertible ts) True
     | _ => False
     end.
 
@@ -159,6 +161,45 @@ Section translate.
       Γ @ tph ⊢ e2 -- e2' : arrowT t2 t ->
       Γ @ tph ⊢ Case cond e1 e2 -- Case cond' e1' e2' : t
 
+  (** pointers *)
+  | alloc_transTy n n' v v' t :
+      storable t →
+      flatten_ty t ≠ [] →
+      Γ @ tph ⊢ n -- n' : uint64T ->
+      Γ @ tph ⊢ v -- v' : t ->
+      Γ @ tph ⊢ AllocN n v -- AllocN n' v': arrayT t
+  (* This rule means we require all external types to have the same size at the
+     spec level as in their implementation.  *)
+  | offset_op_transTy e1 e1' e2 e2' t :
+      Γ @ tph ⊢ e1 -- e1' : arrayT t ->
+      Γ @ tph ⊢ e2 -- e2' : uint64T ->
+      Γ @ tph ⊢ BinOp (OffsetOp (ty_size t)) e1 e2 -- BinOp (OffsetOp (ty_size t)) e1' e2' : arrayT t
+  | array_struct_transTy e e' t :
+      Γ @ tph ⊢ e -- e' : arrayT t ->
+      Γ @ tph ⊢ e -- e' : structRefT (flatten_ty t)
+  | struct_offset_op_transTy e1 e1' (k: Z) ts :
+      0 ≤ k →
+      Z.to_nat k < length ts → (* FIXME: [<] in [Z] with both operands being [nat] *)
+      Γ @ tph ⊢ e1 -- e1' : structRefT ts ->
+      Γ @ tph ⊢ BinOp (OffsetOp k) e1 #1 -- BinOp (OffsetOp k) e1' #1 : structRefT (drop (Z.to_nat k) ts)
+  | load_transTy l l' t ts :
+      Γ @ tph ⊢ l -- l' : structRefT (t::ts) ->
+      Γ @ tph ⊢ Load l -- Load l' : t
+  | store_transTy l l' v v' t ts :
+      Γ @ tph ⊢ l -- l' : structRefT (t::ts) ->
+      Γ @ tph ⊢ v -- v' : t ->
+      Γ @ tph ⊢ Store l v -- Store l' v' : unitT
+  | read_transTy l l' t ts :
+      Γ @ tph ⊢ l -- l' : structRefT (t::ts) ->
+      Γ @ tph ⊢ notation.Read l -- notation.Read l' : t
+  | cmpxchg_transTy l l' v1 v1' v2 v2' t ts :
+      is_unboxedTy t = true ->
+      Γ @ tph ⊢ l -- l' : structRefT (t::ts) ->
+      Γ @ tph ⊢ v1 -- v1' : t ->
+      Γ @ tph ⊢ v2 -- v2' : t ->
+      Γ @ tph ⊢ CmpXchg l v1 v2 -- CmpXchg l' v1' v2' : prodT t boolT
+
+
   (* Journal operations *)
   | readbuf_transTy e1 e1' e2 e2' :
       Γ @ tph ⊢ e1 -- e1' : addrT ->
@@ -186,7 +227,7 @@ Section translate.
       Γ @ tph ⊢ e2 -- e2' : baseT uint64BT ->
       Γ @ tph ⊢ ExternalOp (ext := spec_op) FreeNumOp (e1, e2) --
                (Alloc__FreeNum' (e1', e2')%E) : unitT
-  | alloc_transTy e1 e1' :
+  | jrnl_alloc_transTy e1 e1' :
       Γ @ tph ⊢ e1 -- e1' : extT AllocT ->
       Γ @ tph ⊢ ExternalOp (ext := spec_op) AllocOp e1 --
                ((λ: "x", Skip;; Alloc__AllocNum (Var "x"))%V e1') : baseT uint64BT
