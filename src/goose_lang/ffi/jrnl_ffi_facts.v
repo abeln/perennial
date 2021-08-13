@@ -552,10 +552,16 @@ Definition jrnl_sub_dom (σj1 σj2 : jrnl_map) : Prop :=
 Definition jrnl_sub_state (σj : jrnl_map) (s: sstate) : Prop :=
   (∃ sj, s.(world) = Opened sj ∧ jrnlData σj ⊆ jrnlData sj ∧ jrnlKinds σj = jrnlKinds sj ∧ jrnlAllocs σj ⊆ jrnlAllocs sj).
 
+Definition jrnl_sub_heap_state (σj : jrnl_map) σh (s: sstate) : Prop :=
+  jrnl_sub_state σj s ∧ (σh ⊆ s.(heap)).
+
 Definition jrnl_upd (σj: jrnl_map) (s: sstate) : sstate :=
   set sworld (λ s, Opened {| jrnlData := jrnlData σj ∪ (jrnlData $ get_jrnl s);
                              jrnlKinds := jrnlKinds $ get_jrnl s;
                              jrnlAllocs := jrnlAllocs $ (get_jrnl s) |}) s.
+
+Definition jrnl_upd_heap (σj: jrnl_map) σh (s: sstate) : sstate :=
+  set heap (λ h, σh ∪ h) (jrnl_upd σj s).
 
 Definition jrnl_upd_allocs (σj: jrnl_map) (s: sstate) : sstate :=
   set sworld (λ s, Opened {| jrnlData := jrnlData σj;
@@ -572,11 +578,13 @@ Definition jrnl_upd_allocs (σj: jrnl_map) (s: sstate) : sstate :=
    block. Crucially, the subset of locked addresses will correspond to the σj
    argument of this `always_steps` execution.  *)
 
-Definition always_steps (e: sexpr) (σj: jrnl_map) (e': sexpr) (σj': jrnl_map) : Prop :=
+Definition always_steps (e: sexpr) (σj: jrnl_map) σh (e': sexpr) (σj': jrnl_map) σh' : Prop :=
   (jrnlKinds σj = jrnlKinds σj') ∧
   (jrnl_sub_dom σj σj') ∧
-  (∀ s g, jrnl_sub_state σj s →
-           rtc (λ '(e, (s,g)) '(e', (s',g')), prim_step' e s g [] e' s' g' []) (e, (s,g)) (e', (jrnl_upd σj' s, g))).
+  (dom (gset _) σh ⊆ dom (gset _) σh') ∧
+  (∀ s g, jrnl_sub_heap_state σj σh s →
+          rtc (λ '(e, (s,g)) '(e', (s',g')), prim_step' e s g [] e' s' g' [])
+              (e, (s,g)) (e', (jrnl_upd_heap σj' σh' s, g))).
 
 Lemma jrnl_upd_sub σj s :
   jrnl_sub_state σj s →
@@ -587,6 +595,16 @@ Proof.
   destruct s. rewrite /set//=. f_equal.
   rewrite /= in Heq1. rewrite Heq1. f_equal. destruct sj as [sjd [sjk sja]].
   f_equal => /=. apply map_subseteq_union; auto.
+Qed.
+
+Lemma jrnl_upd_heap_sub σj σh s :
+  jrnl_sub_heap_state σj σh s →
+  jrnl_upd_heap σj σh s = s.
+Proof.
+  intros (Hsub&Hsubh).
+  rewrite /jrnl_upd_heap jrnl_upd_sub //.
+  rewrite /set//=. destruct s; f_equal => //=.
+  apply map_subseteq_union; auto.
 Qed.
 
 Lemma jrnl_sub_state_upd σj1 σj2 s :
@@ -603,18 +621,59 @@ Proof.
   - rewrite Heq /= -Heq_allocs //.
 Qed.
 
+Lemma jrnl_sub_state_world_invariant σj s1 s2:
+  sworld s1 = sworld s2 →
+  jrnl_sub_state σj s1 →
+  jrnl_sub_state σj s2.
+Proof. rewrite /jrnl_sub_state => ->. eauto. Qed.
+
+Lemma jrnl_sub_heap_state_upd σj1 σj2 σh2 s :
+  jrnl_sub_state σj1 s →
+  jrnlKinds σj1 = jrnlKinds σj2 →
+  jrnlAllocs σj1 = jrnlAllocs σj2 →
+  jrnl_sub_heap_state σj2 σh2 (jrnl_upd_heap σj2 σh2 s).
+Proof.
+  intros. split.
+  - eapply jrnl_sub_state_world_invariant; last by (eapply jrnl_sub_state_upd; eauto).
+    rewrite //=. 
+  - rewrite //=. apply map_union_subseteq_l.
+Qed.
+
 Lemma jrnl_upd_upd_sub_dom σj1 σj2 s :
   jrnl_sub_dom σj1 σj2 →
   jrnl_upd σj2 (jrnl_upd σj1 s) = jrnl_upd σj2 s.
 Proof.
-  intros (?&?).
+  intros (Hsub1a&?).
   rewrite /jrnl_upd/set //=. do 3 f_equal.
   apply map_eq => i.
   destruct (jrnlData σj2 !! i) eqn:Hlookup.
   { erewrite lookup_union_Some_l; eauto.
     erewrite lookup_union_Some_l; eauto. }
   rewrite ?lookup_union_r //.
-  apply not_elem_of_dom. apply not_elem_of_dom in Hlookup. rewrite H1. auto.
+  apply not_elem_of_dom. apply not_elem_of_dom in Hlookup. rewrite Hsub1a. auto.
+Qed.
+
+Lemma jrnl_upd_heap_upd_sub_dom σj1 σh1 σj2 σh2 s :
+  jrnl_sub_dom σj1 σj2 →
+  dom (gset _) σh1 ⊆ dom (gset _) σh2 →
+  jrnl_upd_heap σj2 σh2 (jrnl_upd_heap σj1 σh1 s) = jrnl_upd_heap σj2 σh2 s.
+Proof.
+  intros (Hsub1a&?) Hsub2.
+  rewrite /jrnl_upd_heap/jrnl_upd/set //=. f_equal; auto.
+  - rewrite map_union_assoc.
+    f_equal.
+    apply map_eq => i.
+    destruct (σh2 !! i) eqn:Hlookup.
+    { erewrite lookup_union_Some_l; eauto. }
+    rewrite ?lookup_union_r //.
+    rewrite Hlookup.
+    apply not_elem_of_dom. apply not_elem_of_dom in Hlookup. set_solver.
+  - do 2 f_equal. apply map_eq => i.
+    destruct (jrnlData σj2 !! i) eqn:Hlookup.
+    { erewrite lookup_union_Some_l; eauto.
+      erewrite lookup_union_Some_l; eauto. }
+    rewrite ?lookup_union_r //.
+    apply not_elem_of_dom. apply not_elem_of_dom in Hlookup. rewrite Hsub1a. auto.
 Qed.
 
 Lemma jrnl_upd_idemp σj s :
@@ -624,12 +683,19 @@ Proof.
   rewrite map_union_assoc map_union_idemp //.
 Qed.
 
-Lemma always_steps_refl e σj :
+Lemma jrnl_upd_heap_empty σj s :
+  jrnl_upd_heap σj ∅ s = jrnl_upd σj s.
+Proof.
+  rewrite /jrnl_upd_heap/jrnl_upd/set//=. destruct s; eauto => //=; f_equal.
+  rewrite left_id_L //.
+Qed.
+
+Lemma always_steps_refl e σj σh:
   wf_jrnl σj →
-  always_steps e σj e σj.
+  always_steps e σj σh e σj σh.
 Proof.
   intros. split_and! => //= s g Hsub.
-  rewrite jrnl_upd_sub //.
+  rewrite jrnl_upd_heap_sub //.
 Qed.
 
 Lemma jrnl_sub_dom_trans σj1 σj2 σj3 :
@@ -643,21 +709,23 @@ Proof.
   - etransitivity; eauto.
 Qed.
 
-Lemma always_steps_trans e1 σj1 e2 σj2 e3 σj3 :
-  always_steps e1 σj1 e2 σj2 →
-  always_steps e2 σj2 e3 σj3 →
-  always_steps e1 σj1 e3 σj3.
+Lemma always_steps_trans e1 σj1 σh1 e2 σj2 σh2 e3 σj3 σh3 :
+  always_steps e1 σj1 σh1 e2 σj2 σh2 →
+  always_steps e2 σj2 σh2 e3 σj3 σh3→
+  always_steps e1 σj1 σh1 e3 σj3 σh3.
 Proof.
-  intros (Hkinds1&Hsub1&Hsteps1) (Hkinds2&Hsub2&Hsteps2).
+  intros (Hkinds1&Hsub1&Hsubh1&Hsteps1) (Hkinds2&Hsub2&Hsubh2&Hsteps2).
   split_and!; first congruence.
   { eapply jrnl_sub_dom_trans; eassumption. }
+  { etransitivity; eauto. }
   intros s g Hsub.
   eapply rtc_transitive.
   { eapply Hsteps1; eauto. }
-  { assert (jrnl_upd σj3 s = jrnl_upd σj3 (jrnl_upd σj2 s)) as ->.
-    { rewrite jrnl_upd_upd_sub_dom; eauto. }
+  { assert (jrnl_upd_heap σj3 σh3 s = jrnl_upd_heap σj3 σh3 (jrnl_upd_heap σj2 σh2 s)) as ->.
+    { rewrite jrnl_upd_heap_upd_sub_dom; eauto. }
     eapply Hsteps2; eauto.
-    eapply jrnl_sub_state_upd; eauto.
+    eapply jrnl_sub_heap_state_upd; eauto.
+    { destruct Hsub; eauto. }
     { destruct Hsub1 as (?&?&?&?).
       destruct Hsub2 as (?&?&?&?). congruence. }
   }
